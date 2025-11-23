@@ -1,9 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { getWebSocketUrl } from '../api';
+import ChartRenderer from './ChartRenderer';
+import TableRenderer from './TableRenderer';
 
 const ChatBox = () => {
     const [messages, setMessages] = useState([
-        { sender: 'bot', text: 'Hello! I am Hermes. Ask me about shipments, delays, or predictions.' }
+        {
+            sender: 'bot',
+            text: 'Hello! I am Hermes. Ask me about shipments, delays, or predictions.',
+            type: 'text'
+        }
     ]);
     const [input, setInput] = useState('');
     const ws = useRef(null);
@@ -18,7 +24,63 @@ const ChatBox = () => {
 
         ws.current.onmessage = (event) => {
             const message = event.data;
-            setMessages((prev) => [...prev, { sender: 'bot', text: message }]);
+
+            // Try to parse JSON response
+            try {
+                const parsed = JSON.parse(message);
+                if (parsed.result) {
+                    const { summary, chart, table, recommendations } = parsed.result;
+
+                    // Add text summary
+                    if (summary) {
+                        setMessages((prev) => [...prev, {
+                            sender: 'bot',
+                            text: summary,
+                            type: 'text'
+                        }]);
+                    }
+
+                    // Add chart if present
+                    if (chart) {
+                        setMessages((prev) => [...prev, {
+                            sender: 'bot',
+                            chartConfig: chart,
+                            type: 'chart'
+                        }]);
+                    }
+
+                    // Add table if present
+                    if (table) {
+                        setMessages((prev) => [...prev, {
+                            sender: 'bot',
+                            tableConfig: table,
+                            type: 'table'
+                        }]);
+                    }
+
+                    if (Array.isArray(recommendations) && recommendations.length > 0) {
+                        setMessages((prev) => [...prev, {
+                            sender: 'bot',
+                            listItems: recommendations,
+                            type: 'list'
+                        }]);
+                    }
+                } else {
+                    // Fallback to plain text
+                    setMessages((prev) => [...prev, {
+                        sender: 'bot',
+                        text: message,
+                        type: 'text'
+                    }]);
+                }
+            } catch (error) {
+                // If not JSON, display as plain text
+                setMessages((prev) => [...prev, {
+                    sender: 'bot',
+                    text: message,
+                    type: 'text'
+                }]);
+            }
         };
 
         ws.current.onclose = () => {
@@ -39,11 +101,15 @@ const ChatBox = () => {
     const sendMessage = () => {
         if (!input.trim()) return;
 
-        setMessages((prev) => [...prev, { sender: 'user', text: input }]);
+        setMessages((prev) => [...prev, { sender: 'user', text: input, type: 'text' }]);
         if (ws.current && ws.current.readyState === WebSocket.OPEN) {
             ws.current.send(input);
         } else {
-            setMessages((prev) => [...prev, { sender: 'bot', text: 'Error: Connection lost.' }]);
+            setMessages((prev) => [...prev, {
+                sender: 'bot',
+                text: 'Error: Connection lost.',
+                type: 'text'
+            }]);
         }
         setInput('');
     };
@@ -54,14 +120,52 @@ const ChatBox = () => {
         }
     };
 
+    const renderMessage = (msg, index) => {
+        if (msg.type === 'chart') {
+            return (
+                <div key={index} className="message bot">
+                    <div className="message-content">
+                        <ChartRenderer chartConfig={msg.chartConfig} />
+                    </div>
+                </div>
+            );
+        }
+
+        if (msg.type === 'table') {
+            return (
+                <div key={index} className="message bot">
+                    <div className="message-content">
+                        <TableRenderer tableConfig={msg.tableConfig} />
+                    </div>
+                </div>
+            );
+        }
+
+        if (msg.type === 'list') {
+            return (
+                <div key={index} className="message bot">
+                    <div className="message-content">
+                        <ul>
+                            {msg.listItems.map((item, idx) => (
+                                <li key={idx}>{item}</li>
+                            ))}
+                        </ul>
+                    </div>
+                </div>
+            );
+        }
+
+        return (
+            <div key={index} className={`message ${msg.sender}`}>
+                <div className="message-content">{msg.text}</div>
+            </div>
+        );
+    };
+
     return (
         <div className="chat-container">
             <div className="messages">
-                {messages.map((msg, index) => (
-                    <div key={index} className={`message ${msg.sender}`}>
-                        <div className="message-content">{msg.text}</div>
-                    </div>
-                ))}
+                {messages.map(renderMessage)}
                 <div ref={messagesEndRef} />
             </div>
             <div className="input-area">

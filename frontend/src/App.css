@@ -55,7 +55,7 @@
 }
 
 .message {
-  max-width: 80%;
+  max-width: 90%;
   padding: 10px;
   border-radius: 10px;
   text-align: left;
@@ -71,6 +71,12 @@
   align-self: flex-start;
   background-color: #e9ecef;
   color: black;
+  width: 100%;
+  max-width: 100%;
+}
+
+.message-content {
+  width: 100%;
 }
 
 .input-area {
