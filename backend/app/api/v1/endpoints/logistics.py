@@ -19,12 +19,12 @@ async def get_shipment_data():
 @router.websocket("/api/ws/chat")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
+    history: list = []  # per-session memory
     try:
         while True:
             data = await websocket.receive_text()
-            # data is the user query
             df = load_data()
-            response = process_query(data, df)
+            response = process_query(data, df, history=history)
             await websocket.send_text(response)
     except WebSocketDisconnect:
         print("Client disconnected")

@@ -1,3 +1,3 @@
-from . import agent
+from . import agent, tools
 
-__all__ = ["agent"]
+__all__ = ["agent", "tools"]

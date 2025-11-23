@@ -91,6 +91,16 @@ The system can handle various types of queries:
 - "Average delay last month"
 
 ### 5. Predictions (Bonus Feature)
+### 6. Conversational / Text-Only
+- "Explain why delays increased last month (just text)"
+- "Tell me about warehouse performance without a chart"
+- "Why are Route A delays higher?"
+
+If you explicitly ask for "no chart", "text only", or similar, the system returns a narrative summary with no visualization.
+
+- "Predict the delay rate for next 14 days on Route B"
+- "Forecast the next month of delays for WH2"
+- "Roughly how long are delays if Weather issues hit Route C?"
 - "Predict the delay rate for next week"
 - "Forecast next week's delays"
 - "What will delays look like next week?"
@@ -141,6 +151,31 @@ Responses include:
   }
 }
 ```
+
+### Intent System
+Hermes classifies each query into one of several intents which drive routing and response formatting:
+
+| Intent | Purpose | Visualization |
+|--------|---------|--------------|
+| greeting | Salutations / welcome | None |
+| gratitude | User thanks / appreciation | None |
+| clarify | Ambiguous short query requiring clarification | None |
+| prediction | Forecast future delays | Chart + Table |
+| warehouse | Warehouse performance comparison | Chart + Table |
+| route | Route delay performance | Chart + Table |
+| delay_reason | Breakdown of delay reasons | Chart + Table |
+| delay | Delay time statistics/trends | Chart + Table |
+| analytics | General overview summary | Chart (line) |
+| conversation | Explanatory qualitative insight (e.g. "why", "explain") | Suppressed |
+| text_only | Explicit user request for no visualization | Suppressed |
+
+Classifier rules:
+- Picks the most specific analytic intent when keywords match.
+- "conversation" chosen for explanatory, interpretive, narrative requests without explicit viz demand.
+- "text_only" chosen when user explicitly requests no charts/visuals.
+- Logs selected intent to the `hermes.intent` logger.
+
+To extend: add new intent token, update the prompt in `backend/app/ai/master_agent/tools.py`, and handling logic in `agent.py`.
 
 ## Technology Stack
 
@@ -196,11 +231,12 @@ logistic_assistant/
 
 ## Prediction Model
 
-The system uses simple linear regression for delay prediction:
-- Analyzes historical average daily delays
-- Computes trend line using NumPy's `polyfit`
-- Projects delays for the next 7 days
-- Displays forecast with distinct visual styling
+Hermes combines time-series regression with an ensemble scenario model:
+- Analyzes historical average daily delays and fits a linear trend with NumPy's `polyfit`
+- Supports dynamic forecast horizons (e.g., next 5 days, 2 weeks, or 1 month)
+- Builds ensemble estimates that blend a linear model with historical averages for route, warehouse, and delay reason combinations
+- Surfaces the best-performing route/warehouse pairing and highlights dominant weather or operational risks
+- Displays forecasts with dashed-line styling for projected values and shares recommendation bullet points in the chat
 
 ## Extending the System
 

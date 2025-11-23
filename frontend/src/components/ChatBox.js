@@ -29,7 +29,7 @@ const ChatBox = () => {
             try {
                 const parsed = JSON.parse(message);
                 if (parsed.result) {
-                    const { summary, chart, table } = parsed.result;
+                    const { summary, chart, table, recommendations } = parsed.result;
 
                     // Add text summary
                     if (summary) {
@@ -55,6 +55,14 @@ const ChatBox = () => {
                             sender: 'bot',
                             tableConfig: table,
                             type: 'table'
+                        }]);
+                    }
+
+                    if (Array.isArray(recommendations) && recommendations.length > 0) {
+                        setMessages((prev) => [...prev, {
+                            sender: 'bot',
+                            listItems: recommendations,
+                            type: 'list'
                         }]);
                     }
                 } else {
@@ -128,6 +136,20 @@ const ChatBox = () => {
                 <div key={index} className="message bot">
                     <div className="message-content">
                         <TableRenderer tableConfig={msg.tableConfig} />
+                    </div>
+                </div>
+            );
+        }
+
+        if (msg.type === 'list') {
+            return (
+                <div key={index} className="message bot">
+                    <div className="message-content">
+                        <ul>
+                            {msg.listItems.map((item, idx) => (
+                                <li key={idx}>{item}</li>
+                            ))}
+                        </ul>
                     </div>
                 </div>
             );

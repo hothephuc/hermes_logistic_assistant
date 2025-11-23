@@ -11,6 +11,9 @@ class AgentState(TypedDict, total=False):
     intent: str
     filters: Dict[str, Any]
     timeframe: Dict[str, Any]
+    forecast_horizon_days: int
+    history: List[Dict[str, Any]]
+    llm_metadata: Dict[str, Any]
     result: Dict[str, Any]
     response: str
     steps: List[str]

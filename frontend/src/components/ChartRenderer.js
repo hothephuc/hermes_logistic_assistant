@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo, memo } from 'react';
 import {
     Chart as ChartJS,
     CategoryScale,
@@ -27,17 +27,17 @@ ChartJS.register(
     Filler
 );
 
-const ChartRenderer = ({ chartConfig }) => {
-    if (!chartConfig || !chartConfig.data) {
-        return null;
-    }
+const ChartRenderer = memo(({ chartConfig }) => {
+    const type = chartConfig?.type || 'bar';
+    const title = chartConfig?.title || 'Chart';
+    const data = chartConfig?.data || [];
+    const x_label = chartConfig?.x_label;
+    const y_label = chartConfig?.y_label;
+    const dataset_label = chartConfig?.dataset_label;
 
-    const { type, title, data, x_label, y_label, dataset_label } = chartConfig;
-
-    // Build chart data structure for Chart.js
     const labels = data.map(item => item.label);
 
-    const chartData = {
+    const chartData = useMemo(() => ({
         labels,
         datasets: [
             {
@@ -63,16 +63,22 @@ const ChartRenderer = ({ chartConfig }) => {
                     )
                     : 'rgba(54, 162, 235, 1)',
                 borderWidth: 2,
-                borderDash: type === 'line' ? data.map(item => item.isForecast ? [5, 5] : []) : undefined,
                 fill: type === 'line',
-                tension: 0.4,
+                tension: 0.35,
+                segment: type === 'line' ? {
+                    borderDash: ctx => {
+                        const idx = ctx.p1DataIndex;
+                        return data[idx]?.isForecast ? [5, 5] : [];
+                    }
+                } : undefined,
             },
         ],
-    };
+    }), [data, labels, dataset_label, type]);
 
-    const options = {
+    const options = useMemo(() => ({
         responsive: true,
-        maintainAspectRatio: false,
+        maintainAspectRatio: true,
+        animation: false,
         plugins: {
             legend: {
                 position: 'top',
@@ -80,45 +86,53 @@ const ChartRenderer = ({ chartConfig }) => {
             },
             title: {
                 display: true,
-                text: title || 'Chart',
-                font: {
-                    size: 16,
-                    weight: 'bold',
-                },
+                text: title,
+                font: { size: 16, weight: 'bold' },
             },
             tooltip: {
+                intersect: false,
                 callbacks: {
-                    label: function(context) {
+                    label: function (context) {
                         const item = data[context.dataIndex];
-                        return item.tooltip || `${context.dataset.label}: ${context.parsed.y || context.parsed}`;
+                        return item.tooltip || `${context.dataset.label}: ${context.parsed.y ?? context.parsed}`;
                     },
                 },
             },
         },
         scales: type !== 'pie' ? {
             x: {
-                title: {
-                    display: true,
-                    text: x_label || 'X Axis',
-                },
+                title: { display: true, text: x_label || 'X Axis' },
+                ticks: {
+                    autoSkip: true,
+                    maxRotation: 0,
+                    callback: (val, idx) => {
+                        const lbl = labels[idx];
+                        return lbl.length > 12 ? lbl.slice(0, 9) + '…' : lbl;
+                    }
+                }
             },
             y: {
-                title: {
-                    display: true,
-                    text: y_label || 'Y Axis',
-                },
+                title: { display: true, text: y_label || 'Y Axis' },
                 beginAtZero: true,
             },
         } : undefined,
-    };
+    }), [type, title, x_label, y_label, data, labels]);
+
+    if (!chartConfig || data.length === 0) return null;
 
     return (
-        <div style={{ height: '400px', marginTop: '20px' }}>
+        <div style={{
+            height: '400px',
+            width: '100%',
+            maxWidth: '100%',
+            overflowX: 'auto',
+            paddingBottom: '4px'
+        }}>
             {type === 'bar' && <Bar data={chartData} options={options} />}
             {type === 'line' && <Line data={chartData} options={options} />}
             {type === 'pie' && <Pie data={chartData} options={options} />}
         </div>
     );
-};
+});
 
 export default ChartRenderer;
