@@ -32,6 +32,8 @@ An AI-powered logistics assistant using LangGraph multi-agent system to analyze 
 
 ### Backend
 
+**NOTE:** Please create `.env` file in backend folder and add GROQ_API_KEY= 
+
 1. Navigate to the backend directory:
 ```bash
 cd backend
