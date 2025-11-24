@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from datetime import datetime, timedelta
 from typing import Any, Dict
 
@@ -20,236 +19,105 @@ from langgraph.graph import StateGraph
 
 
 def _classify_intent(state: AgentState) -> AgentState:
-    """Heuristic + LLM + conversational follow-up support."""
     ensure_steps(state)
-    query = state["query"].lower()
-    history = state.get("history", [])
-
-    gratitude_tokens = [
-        "thanks",
-        "thank you",
-        "thank u",
-        "much appreciated",
-        "appreciate it",
-    ]
-    if any(tok in query for tok in gratitude_tokens) and len(query.split()) <= 6:
-        state["steps"].append("Heuristic classified intent as 'gratitude'")
-        return update_state(state, intent="gratitude")
-
-    greeting_tokens = [
-        "hi",
-        "hello",
-        "hey",
-        "greetings",
-        "good morning",
-        "good afternoon",
-        "good evening",
-    ]
-    if (
-        any(query.strip().startswith(tok) for tok in greeting_tokens)
-        and len(query.split()) <= 4
-    ):
-        state["steps"].append("Heuristic classified intent as 'greeting'")
-        return update_state(state, intent="greeting")
-
-    ambiguous = len(query.split()) <= 4 and not any(
-        k in query
-        for k in ["predict", "forecast", "warehouse", "route", "reason", "delay"]
-    )
-
-    if history and ambiguous:
-        last_intent = next(
-            (
-                h["intent"]
-                for h in reversed(history)
-                if h.get("intent") and h["intent"] not in ("greeting", "clarify")
-            ),
-            None,
-        )
-        if last_intent:
-            state["steps"].append(f"Context reuse of previous intent '{last_intent}'")
-            return update_state(state, intent=last_intent)
-
-    llm_intent = llm_classify_intent(query, history=history)
-    if llm_intent:
-        state["steps"].append(f"LLM classified intent as '{llm_intent}'")
-        if llm_intent == "analytics" and ambiguous:
-            state["steps"].append("Marked as 'clarify' due to ambiguity")
-            return update_state(state, intent="clarify")
-        return update_state(state, intent=llm_intent)
-
-    intent = "analytics"
-    if any(t in query for t in ["predict", "forecast", "next week", "projection"]):
-        intent = "prediction"
-    elif "warehouse" in query:
-        intent = "warehouse"
-    elif "route" in query:
-        intent = "route"
-    elif "reason" in query:
-        intent = "delay_reason"
-    elif any(
-        t in query for t in ["average delay", "delay last", "delay in", "delay stats"]
-    ):
-        intent = "delay"
-    state["steps"].append(f"Heuristic classified intent as '{intent}'")
-    if intent == "analytics" and ambiguous:
-        state["steps"].append("Heuristic ambiguity detected → intent set to 'clarify'")
+    intent = llm_classify_intent(state["query"], history=state.get("history", []))
+    if not intent:
+        state["steps"].append("LLM intent unavailable → clarification required")
         return update_state(state, intent="clarify")
+    state["steps"].append(f"LLM classified intent '{intent}'")
     return update_state(state, intent=intent)
 
 
 def _augment_timeframe(state: AgentState) -> AgentState:
-    """Derive simple timeframe filters based on temporal hints in the query."""
-
-    # Skip timeframe for greeting or clarify
-    if state.get("intent") in {"greeting", "clarify"}:
-        state["steps"].append("Skipped timeframe augmentation for non-analytic intent")
-        return state
-
     ensure_steps(state)
-
-    query = state["query"].lower()
+    if state.get("intent") in {"greeting", "gratitude", "clarify"}:
+        state["steps"].append("Skipped timeframe (non-analytic intent)")
+        return state
     df = state["data"]
     metadata = _get_llm_metadata(state, df)
-    timeframe: Dict[str, datetime] = {}
-
     timeframe = _resolve_timeframe(metadata, df)
-    timeframe_source = "llm" if timeframe else None
-
-    if not timeframe:
-        if "last week" in query:
-            end_date = df["date"].max()
-            start_date = end_date - timedelta(days=7)
-            timeframe = {"start": start_date, "end": end_date}
-            timeframe_source = "heuristic"
-        elif "october" in query:
-            # assume most recent october in data
-            dates = df["date"]
-            october_rows = dates[dates.dt.month == 10]
-            if not october_rows.empty:
-                year = october_rows.dt.year.max()
-                timeframe = {
-                    "start": datetime(year=year, month=10, day=1),
-                    "end": datetime(year=year, month=10, day=31),
-                }
-                timeframe_source = "heuristic"
-        elif "last month" in query:
-            end_date = df["date"].max()
-            start_date = end_date - timedelta(days=30)
-            timeframe = {"start": start_date, "end": end_date}
-            timeframe_source = "heuristic"
-
     if timeframe:
-        label = "LLM metadata" if timeframe_source == "llm" else "heuristics"
         state["steps"].append(
-            f"Applied timeframe ({label}) between {timeframe['start'].date()} "
-            + f"and {timeframe['end'].date()}"
+            f"Applied LLM timeframe {timeframe['start'].date()} → {timeframe['end'].date()}"  # noqa: E501
         )
-    return update_state(state, timeframe=timeframe)
+    else:
+        state["steps"].append("No timeframe detected by LLM")
+    return update_state(state, timeframe=timeframe or {})
 
 
 def _augment_filters(state: AgentState) -> AgentState:
-    """Infer entity filters and forecast horizon from the query text."""
-
     ensure_steps(state)
-    query = state["query"].lower()
+    if state.get("intent") in {"greeting", "gratitude", "clarify"}:
+        state["steps"].append("Skipped filters (non-analytic intent)")
+        return state
     df = state["data"]
     metadata = _get_llm_metadata(state, df)
-    filters = dict(state.get("filters", {}))
-
-    def _detect(column: str, values) -> None:
-        for value in values:
-            if pd.isna(value):
-                continue
-            token = str(value).lower()
-            if token and token in query:
-                if filters.get(column) != value:
-                    filters[column] = value
-                return
-
-    filters = _apply_llm_filters(filters, metadata, df)
-
-    _detect("route", df["route"].unique())
-    _detect("warehouse", df["warehouse"].unique())
-    _detect("delay_reason", df["delay_reason"].unique())
-
+    filters = _apply_llm_filters({}, metadata, df)
     if filters:
-        detected = ", ".join(f"{k}={v}" for k, v in filters.items())
-        state["steps"].append(f"Applied entity filters: {detected}")
-
+        state["steps"].append(
+            "Applied LLM filters: " + ", ".join(f"{k}={v}" for k, v in filters.items())
+        )
     horizon = _extract_llm_horizon(metadata)
-    horizon_source = "llm" if horizon is not None else None
-    if horizon is None and state.get("intent") == "prediction":
-        heuristic = _extract_forecast_horizon(query)
-        if heuristic is not None:
-            horizon = max(1, min(heuristic, 120))
-            horizon_source = "heuristic"
-            if horizon != state.get("forecast_horizon_days"):
-                state["steps"].append(f"Set forecast horizon to {horizon} days")
-
-    if horizon is not None:
-        if horizon_source == "llm" and horizon != state.get("forecast_horizon_days"):
-            state["steps"].append(f"LLM set forecast horizon to {horizon} days")
+    if horizon:
         state["forecast_horizon_days"] = horizon
-
-    state["filters"] = filters
-    return state
+        state["steps"].append(f"LLM forecast horizon set to {horizon} days")
+    return update_state(state, filters=filters)
 
 
 def _run_intent(state: AgentState) -> AgentState:
-    """Dispatch the query to the appropriate specialised agent."""
-
-    if state.get("intent") == "gratitude":
+    intent = state.get("intent")
+    if intent == "gratitude":
         result = {
-            "summary": "You’re welcome! Let me know if you need anything else about your shipments.",  # noqa: E501
-            "intent": "gratitude",
+            "summary": "Glad to help.",
+            "intent": intent,
             "chart": None,
             "table": None,
         }
-    elif state.get("intent") == "greeting":
+    elif intent == "greeting":
         result = {
             "summary": "Hello! I am Hermes. Ask me about shipments, delays, or predictions.",  # noqa: E501
-            "intent": "greeting",
+            "intent": intent,
             "chart": None,
             "table": None,
         }
-    elif state.get("intent") == "clarify":
+    elif intent == "clarify":
         reply = llm_generate_reply(state["query"], history=state.get("history", []))
+        result = {"summary": reply, "intent": intent, "chart": None, "table": None}
+        state["steps"].append("LLM clarification generated")
+    elif intent in {"conversation", "text_only"}:
+        base = (
+            llm_classify_intent(state["query"], history=state.get("history", []))
+            or "analytics"
+        )
+        if base not in {
+            "route",
+            "warehouse",
+            "delay_reason",
+            "delay",
+            "analytics",
+            "prediction",
+        }:
+            base = "analytics"
+        prior = state["intent"]
+        state["intent"] = base
+        analytic = (
+            run_analytics_intent(state)
+            if base != "prediction"
+            else run_prediction_intent(state)
+        )
+        state["intent"] = prior
+        prefix = "Text overview: " if prior == "conversation" else "Summary: "
         result = {
-            "summary": reply,
-            "intent": "clarify",
+            "summary": prefix + analytic.get("summary", ""),
+            "intent": prior,
             "chart": None,
             "table": None,
         }
-        state["steps"].append("Generated clarification reply via LLM")
-    elif state.get("intent") in {"conversation", "text_only"}:
-        # Derive an underlying analytic intent for generating a summary
-        base_intent = _infer_base_analytic_intent(state["query"])
-        original_intent = state.get("intent")
-        prev_intent = state.get("intent")
-        state["intent"] = base_intent
-        analytic_result = run_analytics_intent(state)
-        state["intent"] = prev_intent  # restore
-        summary_prefix = (
-            "Here's a textual overview: "
-            if original_intent == "conversation"
-            else "Summary: "
-        )
-        result = {
-            "summary": summary_prefix
-            + analytic_result.get("summary", "No overview available."),
-            "intent": original_intent,
-            "chart": None,  # explicitly suppress visualization
-            "table": None,
-        }
-        state["steps"].append(
-            f"Derived base analytic intent '{base_intent}' for conversational/text-only response"  # noqa: E501
-        )
-    elif state.get("intent") == "prediction":
+        state["steps"].append(f"Conversation mapped to analytic intent '{base}'")
+    elif intent == "prediction":
         result = run_prediction_intent(state)
     else:
         result = run_analytics_intent(state)
-
     return update_state(state, result=result)
 
 
@@ -292,67 +160,6 @@ def build_master_graph() -> StateGraph:
     graph.add_edge("format_response", END)
 
     return graph
-
-
-def _infer_base_analytic_intent(query: str) -> str:
-    q = query.lower()
-    if any(t in q for t in ["predict", "forecast", "next week", "projection"]):
-        return "prediction"
-    if "warehouse" in q:
-        return "warehouse"
-    if "route" in q:
-        return "route"
-    if "reason" in q:
-        return "delay_reason"
-    if any(
-        t in q
-        for t in ["average delay", "delay last", "delay in", "delay stats", "delay"]
-    ):
-        return "delay"
-    return "analytics"
-
-
-def _extract_forecast_horizon(query: str) -> int | None:
-    """Parse phrases like 'next 10 days' or 'next month' into day counts."""
-
-    patterns = [
-        r"next\s+(\d+)\s+(day|days|week|weeks|month|months|quarter|quarters)",
-        r"forecast\s+(\d+)\s+(day|days|week|weeks|month|months)",
-        r"(\d+)\s+(day|days|week|weeks|month|months)\s+(ahead|forward|out)",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, query)
-        if match:
-            value = int(match.group(1))
-            unit = match.group(2)
-            return _convert_unit_to_days(value, unit)
-
-    heuristics = [
-        ("next week", 7),
-        ("next couple of weeks", 14),
-        ("next few weeks", 21),
-        ("next few days", 5),
-        ("coming days", 5),
-        ("next month", 30),
-        ("next quarter", 90),
-    ]
-    for phrase, days in heuristics:
-        if phrase in query:
-            return days
-    return None
-
-
-def _convert_unit_to_days(value: int, unit: str) -> int:
-    unit = unit.lower()
-    if unit.startswith("day"):
-        return value
-    if unit.startswith("week"):
-        return value * 7
-    if unit.startswith("month"):
-        return value * 30
-    if unit.startswith("quarter"):
-        return value * 90
-    return value
 
 
 def _get_llm_metadata(
@@ -469,3 +276,21 @@ def _extract_llm_horizon(metadata: Dict[str, Any]) -> int | None:
     if isinstance(horizon, (int, float)) and horizon > 0:
         return min(int(horizon), 365)
     return None
+
+
+def _convert_unit_to_days(value: int, unit: str) -> int:
+    """Map relative timeframe units to day counts."""
+    unit = unit.lower().strip()
+    mapping = {
+        "day": 1,
+        "days": 1,
+        "week": 7,
+        "weeks": 7,
+        "month": 30,
+        "months": 30,
+        "quarter": 90,
+        "quarters": 90,
+        "year": 365,
+        "years": 365,
+    }
+    return value * mapping.get(unit, 1)

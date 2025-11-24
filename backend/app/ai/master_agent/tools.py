@@ -33,11 +33,11 @@ if not logger.handlers:
     logging.basicConfig(level=os.getenv("HERMES_LOG_LEVEL", "INFO"))
 
 _MODEL_MAP = {
-    "intent": "llama-3.1-8b-instant",
+    "intent": "llama-3.3-70b-versatile",
     "clarify": "llama-3.3-70b-versatile",
-    "metadata": "llama-3.1-70b-versatile",
-    "reasoning": "llama-3.1-70b-versatile",
-    "default": "llama-3.1-8b-instant",
+    "metadata": "llama-3.3-70b-versatile",
+    "reasoning": "llama-3.3-70b-versatile",
+    "default": "llama-3.3-70b-versatile",
 }
 
 _CAPABILITY_TOKENS = {
@@ -62,6 +62,30 @@ def _get_groq_client() -> Groq:
         return Groq(api_key=api_key)
     except Exception as e:
         raise RuntimeError(f"Failed to initialize Groq client: {e}") from e
+
+
+def _extract_json_object(raw: str) -> Dict[str, Any]:
+    """Strip markdown fences and extract first valid JSON object."""
+    if not raw:
+        return {}
+    txt = raw.strip()
+    # Remove ```json or ``` fences
+    if txt.startswith("```"):
+        txt = txt.strip("`")
+        # After stripping all backticks, try removing leading 'json'
+        txt = txt.replace("json\n", "", 1).replace("json\r\n", "", 1)
+    # Fallback: locate first '{' and last '}'.
+    if "{" in txt and "}" in txt:
+        start = txt.find("{")
+        end = txt.rfind("}") + 1
+        candidate = txt[start:end]
+    else:
+        candidate = txt
+    try:
+        data = json.loads(candidate)
+        return data if isinstance(data, dict) else {}
+    except json.JSONDecodeError:
+        return {}
 
 
 def llm_classify_intent(query: str, history: list | None = None) -> Optional[str]:
@@ -109,11 +133,7 @@ def llm_classify_intent(query: str, history: list | None = None) -> Optional[str
         max_tokens=64,
     )
     content = completion.choices[0].message.content.strip()
-    try:
-        data = json.loads(content)
-    except json.JSONDecodeError:
-        logger.warning("Intent classifier JSON parse failed: %s", content)
-        return None
+    data = _extract_json_object(content)
     intent = (data.get("intent") or "").strip()
     if intent not in _INTENTS:
         logger.info(
@@ -222,9 +242,125 @@ def llm_parse_query_metadata(
         return {}
 
     content = completion.choices[0].message.content.strip()
-    try:
-        data = json.loads(content)
-    except json.JSONDecodeError:
-        logger.warning("Metadata extractor JSON parse failed: %s", content)
-        return {}
+    data = _extract_json_object(content)
     return data if isinstance(data, dict) else {}
+
+
+def llm_generate_delay_plan(query: str) -> Dict[str, Any]:
+    """
+    Return JSON with:
+      python_code: defines compute_metrics(df) -> Dict[str, number]
+      summary_template:
+    e.g.
+    "Total delay for {period} is {total_delay_minutes:.0f} minutes..."
+    """
+    try:
+        client = _get_groq_client()
+    except RuntimeError as exc:
+        logger.warning("Delay plan unavailable: %s", exc)
+        return {}
+    model = select_model("reasoning", query)
+    prompt = (
+        "Columns: id, route, warehouse, delivery_time, delay_minutes, delay_reason, date.\n"  # noqa: E501
+        'Return STRICT JSON: {"python_code": "...", "summary_template": "..."}\n'  # noqa: E501
+        "python_code MUST define compute_metrics(df) returning a dict of numeric metrics requested.\n"  # noqa: E501
+        "Use only pandas (pd) already imported. No other imports. Avoid unsafe operations.\n"  # noqa: E501
+        "summary_template placeholders should reference metric keys and {period}."
+    )
+    try:
+        c = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "Generate safe pandas metric code."},
+                {"role": "user", "content": f"Query: {query}\n{prompt}"},
+            ],
+            temperature=0.2,
+            max_tokens=320,
+        )
+    except Exception as exc:
+        logger.warning("Delay plan call failed: %s", exc)
+        return {}
+    content = c.choices[0].message.content.strip()
+    return _extract_json_object(content)
+
+
+def llm_generate_route_plan(query: str) -> Dict[str, Any]:  # noqa: E501
+    """
+    JSON keys:
+      sort_field: delayed_shipments | total_delay_minutes | avg_delay_minutes | avg_delivery_time | total_shipments
+      sort_order: asc | desc
+      metric_label: human readable label
+      chart_title: title
+      focus_phrase: descriptor like 'best-performing' or 'lowest-impact'
+      summary_template: uses {period},{top_label},{metric_label},{metric_value},{focus_phrase}
+    """
+    try:
+        client = _get_groq_client()
+    except RuntimeError as exc:
+        logger.warning("Route plan unavailable: %s", exc)
+        return {}
+    model = select_model("reasoning", query)
+    prompt = (
+        "Produce STRICT JSON route analytics plan.\n"
+        "Keys: sort_field, sort_order, metric_label, chart_title, focus_phrase, summary_template.\n"
+        "Fields allowed for sort_field: delayed_shipments,total_delay_minutes,avg_delay_minutes,avg_delivery_time,total_shipments.\n"
+        "Align 'best' with minimal delays (asc) or fastest delivery (asc); 'worst' with maximal delays (desc).\n"
+        "summary_template must reference {period},{top_label},{metric_label},{metric_value},{focus_phrase}."
+    )
+    try:
+        c = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "Create JSON plan for route analytics."},
+                {"role": "user", "content": f"Query: {query}\n{prompt}"},
+            ],
+            temperature=0.2,
+            max_tokens=260,
+        )
+    except Exception as exc:
+        logger.warning("Route plan call failed: %s", exc)
+        return {}
+    content = c.choices[0].message.content.strip()
+    return _extract_json_object(content)
+
+
+def llm_generate_warehouse_plan(query: str) -> Dict[str, Any]:
+    """
+    JSON keys:
+      metric_field: avg_delivery_time | delayed_shipments | avg_delay_minutes | total_shipments
+      sort_order: asc | desc
+      metric_label, chart_title, focus_phrase, summary_template
+      delivery_time_threshold: null or number (days)
+      summary_template placeholders: {period},{top_label},{metric_label},{metric_value},{focus_phrase},{threshold}
+    """
+    try:
+        client = _get_groq_client()
+    except RuntimeError as exc:
+        logger.warning("Warehouse plan unavailable: %s", exc)
+        return {}
+    model = select_model("reasoning", query)
+    prompt = (
+        "Produce STRICT JSON warehouse analytics plan.\n"
+        "Keys: metric_field, sort_order, metric_label, chart_title, focus_phrase, summary_template, delivery_time_threshold.\n"
+        "metric_field limited to avg_delivery_time, delayed_shipments, avg_delay_minutes, total_shipments.\n"
+        "If user asks 'above X days', set delivery_time_threshold.\n"
+        "summary_template must reference {period},{top_label},{metric_label},{metric_value},{focus_phrase} and optionally {threshold}."
+    )
+    try:
+        c = client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Create JSON plan for warehouse analytics.",
+                },
+                {"role": "user", "content": f"Query: {query}\n{prompt}"},
+            ],
+            temperature=0.2,
+            max_tokens=260,
+        )
+    except Exception as exc:
+        logger.warning("Warehouse plan call failed: %s", exc)
+        return {}
+    content = c.choices[0].message.content.strip()
+    return _extract_json_object(content)
